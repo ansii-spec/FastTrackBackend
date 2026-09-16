@@ -3,7 +3,7 @@ const fs = require("fs");
 const readline = require("readline");
 const path = require("path");
 const multer = require("multer");
-const { exec } = require("child_process");
+const { exec, spawn } = require("child_process");
 
 const app = express();
 const PORT = 3000;
@@ -110,60 +110,156 @@ function loadDatabase(callback) {
 // Load the NDJSON records right when the server spins up
 loadDatabase();
 
-// 1. POST Route to upload PDF, process it, and update the in-memory cache
-app.post("/upload-timetable", upload.single("timetable_pdf"), (req, res) => {
-  // Allow up to 10 minutes for large timetable PDF extraction
-  req.setTimeout(600000);
-  res.setTimeout(600000);
+// In-memory status for async background upload processing
+let currentUploadJob = {
+  id: null,
+  status: "idle", // "idle" | "processing" | "completed" | "error"
+  progress: 0,
+  stage: "",
+  page: 0,
+  totalPages: 0,
+  studentsLoaded: 0,
+  sourceFile: currentSourceFile,
+  error: null,
+  hint: null,
+  details: null,
+  startedAt: null,
+  completedAt: null
+};
 
+// Polling endpoint to check live processing status
+app.get("/upload-status", (req, res) => {
+  res.json({
+    ...currentUploadJob,
+    totalCachedStudents: students.length,
+    activeSourceFile: currentSourceFile
+  });
+});
+
+// 1. POST Route to upload PDF: Accepts file, responds immediately (202), and processes in background
+app.post("/upload-timetable", upload.single("timetable_pdf"), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No PDF file uploaded." });
   }
 
+  // Prevent concurrent upload jobs from colliding
+  if (currentUploadJob.status === "processing") {
+    fs.unlink(req.file.path, () => {});
+    return res.status(409).json({
+      error: "A timetable upload is already in progress.",
+      hint: "Please wait for the current timetable to finish processing.",
+      job_id: currentUploadJob.id
+    });
+  }
+
   const uploadedPdfPath = req.file.path;
   const originalPdfName = req.file.originalname;
+  const jobId = Date.now().toString();
 
-  console.log(`[Upload] Processing timetable PDF: "${originalPdfName}" (${(req.file.size / 1024 / 1024).toFixed(2)} MB)...`);
+  console.log(`[Upload] Received PDF: "${originalPdfName}" (${(req.file.size / 1024 / 1024).toFixed(2)} MB). Starting async processing...`);
 
-  // Execute the Python script with expanded buffer and timeout
-  const execOptions = {
-    maxBuffer: 30 * 1024 * 1024, // 30MB stdout buffer to prevent overflow on large PDFs
-    timeout: 600000              // 10 minute timeout
+  // Initialize background job state
+  currentUploadJob = {
+    id: jobId,
+    status: "processing",
+    progress: 5,
+    stage: "Starting PDF parser in background...",
+    page: 0,
+    totalPages: 0,
+    studentsLoaded: 0,
+    sourceFile: originalPdfName,
+    error: null,
+    hint: null,
+    details: null,
+    startedAt: new Date().toISOString(),
+    completedAt: null
   };
 
-  exec(`"${pythonCmd}" "${pythonScriptPath}" "${uploadedPdfPath}"`, execOptions, (error, stdout, stderr) => {
-    // Delete the temporary uploaded PDF file to keep server clean
+  // RESPOND IMMEDIATELY TO BROWSER - prevents any gateway / browser timeouts!
+  res.status(202).json({
+    message: "PDF uploaded successfully. Processing started in background.",
+    job_id: jobId,
+    source_file: originalPdfName,
+    status_url: "/upload-status"
+  });
+
+  // Launch Python converter asynchronously using spawn to stream real-time progress
+  let pythonStderr = "";
+  const pyProcess = spawn(pythonCmd, [pythonScriptPath, uploadedPdfPath]);
+
+  pyProcess.stdout.on("data", (chunk) => {
+    const text = chunk.toString();
+    console.log(`[Python]: ${text.trim()}`);
+
+    // Parse progress from converter.py: "  page 30/68 -> 30 students"
+    const match = text.match(/page\s+(\d+)\/(\d+)\s+->\s+(\d+)\s+students/i);
+    if (match) {
+      const page = parseInt(match[1], 10);
+      const totalPages = parseInt(match[2], 10);
+      const studentCount = parseInt(match[3], 10);
+
+      currentUploadJob.page = page;
+      currentUploadJob.totalPages = totalPages;
+      currentUploadJob.studentsLoaded = studentCount;
+
+      // Map progress from 10% to 90% during page parsing
+      const pct = Math.round(10 + (page / totalPages) * 80);
+      currentUploadJob.progress = Math.min(90, pct);
+      currentUploadJob.stage = `Parsed page ${page} of ${totalPages} (${studentCount.toLocaleString()} students found)...`;
+    } else if (text.includes("Processing page-by-page")) {
+      currentUploadJob.progress = 10;
+      currentUploadJob.stage = "Scanning timetable pages...";
+    }
+  });
+
+  pyProcess.stderr.on("data", (chunk) => {
+    pythonStderr += chunk.toString();
+  });
+
+  pyProcess.on("error", (err) => {
+    console.error(`[Process Launch Error]: ${err.message}`);
+    fs.unlink(uploadedPdfPath, () => {});
+
+    currentUploadJob.status = "error";
+    currentUploadJob.error = "Failed to launch Python parser.";
+    currentUploadJob.details = err.message;
+    currentUploadJob.hint = "Verify Python installation and file permissions.";
+  });
+
+  pyProcess.on("close", (code, signal) => {
+    // Delete temp upload file
     fs.unlink(uploadedPdfPath, (err) => {
       if (err) console.error("Failed to delete temp PDF file:", err);
     });
 
-    if (error) {
-      console.error(`[Upload Error]: ${error.message}`);
-      if (stderr) console.error(`[Python stderr]:\n${stderr}`);
+    if (code !== 0) {
+      console.error(`[Python Exit with code ${code} / signal ${signal}]`);
+      if (pythonStderr) console.error(`[Python stderr]:\n${pythonStderr}`);
 
       let errorMessage = "Failed to process the timetable PDF.";
       let solutionHint = "";
 
-      if (stderr && stderr.includes("No module named 'pdfplumber'")) {
+      if (pythonStderr && pythonStderr.includes("No module named 'pdfplumber'")) {
         errorMessage = "Python library 'pdfplumber' is missing on the server.";
         solutionHint = "Run 'pip install pdfplumber' in your server environment.";
-      } else if (error.signal === "SIGKILL" || error.code === 137) {
+      } else if (signal === "SIGKILL" || code === 137) {
         errorMessage = "Server ran out of memory (OOM Killed by Linux).";
         solutionHint = "Enable swap memory on your EC2 instance (e.g. 'sudo fallocate -l 2G /swapfile').";
       }
 
-      return res.status(500).json({
-        error: errorMessage,
-        hint: solutionHint,
-        details: stderr ? stderr.trim() : error.message
-      });
+      currentUploadJob.status = "error";
+      currentUploadJob.error = errorMessage;
+      currentUploadJob.hint = solutionHint;
+      currentUploadJob.details = pythonStderr ? pythonStderr.trim() : `Process exited with code ${code}`;
+      return;
     }
 
-    console.log(`[Upload] PDF parsed successfully by Python.`);
+    console.log(`[Upload] Python finished successfully. Reloading database in memory...`);
+    currentUploadJob.stage = "Reloading database cache in memory...";
+    currentUploadJob.progress = 95;
 
     // Reload the database in memory now that the file has been overwritten by Python
     loadDatabase(() => {
-      // Store the uploaded PDF's original file name
       currentSourceFile = originalPdfName;
       try {
         fs.writeFileSync(
@@ -176,11 +272,11 @@ app.post("/upload-timetable", upload.single("timetable_pdf"), (req, res) => {
 
       console.log(`[Upload] Database reloaded with ${students.length} student records.`);
 
-      res.json({
-        message: "Timetable updated and reloaded successfully!",
-        source_file: currentSourceFile,
-        students_loaded: students.length
-      });
+      currentUploadJob.status = "completed";
+      currentUploadJob.progress = 100;
+      currentUploadJob.stage = "Timetable processed & synchronized successfully!";
+      currentUploadJob.studentsLoaded = students.length;
+      currentUploadJob.completedAt = new Date().toISOString();
     });
   });
 });
