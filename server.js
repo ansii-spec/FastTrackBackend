@@ -17,8 +17,8 @@ const pythonScriptPath = fs.existsSync(path.join(__dirname, "converter.py"))
   ? path.join(__dirname, "converter.py")
   : path.join(__dirname, "convert.py");
 
-// Detect virtual environment python if available (has pdfplumber installed)
-const venvPython = path.join(__dirname, ".env", "bin", "python");
+// Detect virtual environment python if available (updated path from '.env' to 'venv')
+const venvPython = path.join(__dirname, "venv", "bin", "python");
 const pythonCmd = fs.existsSync(venvPython) ? `"${venvPython}"` : "python3";
 
 // Configure multer to temporarily store uploaded PDFs in an 'uploads' directory
