@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Upload and process academic student timetable PDF files into fast, searchable database records." />
+  <title>Timetable Upload | FastTrack</title>
+
+  <!-- Modern Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --primary-light: #eff6ff;
+      --primary-border: #bfdbfe;
+      --indigo: #4f46e5;
+      --indigo-dark: #3730a3;
+      --indigo-light: #eef2ff;
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+      --bg-page: #f8fafc;
+      --card-bg: rgba(255, 255, 255, 0.95);
+      --card-border: rgba(226, 232, 240, 0.85);
+      --card-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(226, 232, 240, 0.7);
+      --success-bg: #ecfdf5;
+      --success-border: #a7f3d0;
+      --success-text: #065f46;
+      --error-bg: #fef2f2;
+      --error-border: #fecaca;
+      --error-text: #991b1b;
+      --transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at 10% 10%, #eff6ff 0%, #f8fafc 40%, #eef2ff 100%);
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      color: var(--text-main);
+      padding: 24px 16px;
+      position: relative;
+      overflow-x: hidden;
+    }
+
+    /* Ambient background glowing orbs */
+    body::before {
+      content: '';
+      position: absolute;
+      width: 460px;
+      height: 460px;
+      top: -120px;
+      right: -100px;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.12), transparent 70%);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    body::after {
+      content: '';
+      position: absolute;
+      width: 520px;
+      height: 520px;
+      bottom: -150px;
+      left: -120px;
+      background: radial-gradient(circle, rgba(37, 99, 235, 0.10), transparent 70%);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .container {
+      width: min(100%, 540px);
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Main Card */
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      padding: 44px 38px;
+      border-radius: 24px;
+      box-shadow: var(--card-shadow);
+      border: 1px solid var(--card-border);
+      transition: var(--transition);
+    }
+
+    /* Header & Badge */
+    .brand-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin: 0 auto 16px;
+      padding: 6px 14px;
+      background: #eff6ff;
+      border: 1px solid #dbeafe;
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border-radius: 999px;
+    }
+
+    .brand-badge svg {
+      width: 14px;
+      height: 14px;
+      fill: currentColor;
+    }
+
+    .header-group {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 27px;
+      font-weight: 800;
+      color: #0f172a;
+      letter-spacing: -0.025em;
+      line-height: 1.25;
+    }
+
+    .subtitle {
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 14.5px;
+      line-height: 1.5;
+    }
+
+    /* Upload Area */
+    .upload-area {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      border: 2px dashed #cbd5e1;
+      border-radius: 18px;
+      padding: 38px 24px;
+      text-align: center;
+      cursor: pointer;
+      background: #f8fafc;
+      transition: var(--transition);
+      user-select: none;
+    }
+
+    .upload-area:hover {
+      border-color: var(--primary);
+      background: #f0f7ff;
+      transform: translateY(-1px);
+    }
+
+    .upload-area.dragover {
+      border-color: var(--primary);
+      border-style: solid;
+      background: #e0edff;
+      box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.15);
+      transform: scale(1.01);
+    }
+
+    .upload-icon-wrap {
+      width: 62px;
+      height: 62px;
+      border-radius: 16px;
+      background: #eff6ff;
+      color: var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 14px;
+      transition: var(--transition);
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.08);
+    }
+
+    .upload-area:hover .upload-icon-wrap,
+    .upload-area.dragover .upload-icon-wrap {
+      background: var(--primary);
+      color: #ffffff;
+      transform: scale(1.08);
+    }
+
+    .upload-icon-wrap svg {
+      width: 32px;
+      height: 32px;
+      stroke-width: 1.8;
+    }
+
+    .upload-text {
+      font-size: 15.5px;
+      font-weight: 700;
+      color: #1e293b;
+      margin-bottom: 4px;
+    }
+
+    .upload-text span {
+      color: var(--primary);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+
+    .upload-hint {
+      color: var(--text-muted);
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .upload-hint .pill {
+      font-size: 11px;
+      font-weight: 600;
+      background: #e2e8f0;
+      padding: 2px 7px;
+      border-radius: 6px;
+      color: #475569;
+    }
+
+    #fileInput {
+      display: none;
+    }
+
+    /* File Name Card */
+    .file-name {
+      margin-top: 16px;
+      padding: 12px 16px;
+      border-radius: 12px;
+      background: var(--indigo-light);
+      border: 1px solid #c7d2fe;
+      color: var(--indigo-dark);
+      font-size: 14px;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      animation: fadeIn 0.2s ease-out;
+    }
+
+    .file-details {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .file-pdf-tag {
+      background: #e11d48;
+      color: white;
+      font-size: 10.5px;
+      font-weight: 800;
+      padding: 3px 6px;
+      border-radius: 5px;
+      letter-spacing: 0.05em;
+      flex-shrink: 0;
+    }
+
+    .file-title-group {
+      min-width: 0;
+    }
+
+    .file-title-text {
+      font-weight: 600;
+      color: #1e1b4b;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 13.5px;
+    }
+
+    .file-size-text {
+      font-size: 12px;
+      color: #6366f1;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .clear-file-btn {
+      background: none;
+      border: none;
+      color: #6366f1;
+      cursor: pointer;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      margin: 0;
+      padding: 0;
+      flex-shrink: 0;
+      transition: var(--transition);
+    }
+
+    .clear-file-btn:hover {
+      background: #e0e7ff;
+      color: #4338ca;
+    }
+
+    /* Submit Button */
+    button[type="submit"] {
+      width: 100%;
+      margin-top: 22px;
+      padding: 14px 20px;
+      border: none;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      color: white;
+      font-size: 15.5px;
+      font-weight: 700;
+      font-family: inherit;
+      cursor: pointer;
+      transition: var(--transition);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      box-shadow: 0 4px 14px 0 rgba(37, 99, 235, 0.35);
+    }
+
+    button[type="submit"]:hover:not(:disabled) {
+      background: linear-gradient(135deg, #1d4ed8, #1e40af);
+      transform: translateY(-1.5px);
+      box-shadow: 0 6px 20px 0 rgba(37, 99, 235, 0.45);
+    }
+
+    button[type="submit"]:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    button[type="submit"]:disabled {
+      background: #94a3b8;
+      box-shadow: none;
+      cursor: not-allowed;
+      opacity: 0.75;
+      transform: none;
+    }
+
+    /* Status Notifications */
+    .status {
+      display: none;
+      margin-top: 22px;
+      padding: 18px 20px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.55;
+      animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .status.success {
+      display: block;
+      background: var(--success-bg);
+      color: var(--success-text);
+      border: 1px solid var(--success-border);
+      box-shadow: 0 4px 12px rgba(16, 185, 129, 0.08);
+    }
+
+    .status.error {
+      display: block;
+      background: var(--error-bg);
+      color: var(--error-text);
+      border: 1px solid var(--error-border);
+      box-shadow: 0 4px 12px rgba(239, 68, 68, 0.08);
+    }
+
+    .status.loading {
+      display: block;
+      background: #eff6ff;
+      color: #1e40af;
+      border: 1px solid #bfdbfe;
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.08);
+    }
+
+    .status-content {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .status-icon-box {
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .status-body {
+      flex-grow: 1;
+    }
+
+    .status-title {
+      font-weight: 700;
+      font-size: 14.5px;
+      margin-bottom: 3px;
+    }
+
+    .stats {
+      margin-top: 8px;
+      font-size: 13px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      background: rgba(16, 185, 129, 0.15);
+      border-radius: 6px;
+      font-weight: 600;
+      color: #065f46;
+    }
+
+    /* Verification Tester Widget */
+    .verify-box {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(16, 185, 129, 0.25);
+    }
+
+    .verify-box-title {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: #047857;
+      margin-bottom: 6px;
+    }
+
+    .verify-form {
+      display: flex;
+      gap: 8px;
+    }
+
+    .verify-input {
+      flex: 1;
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: 1px solid #a7f3d0;
+      background: white;
+      font-size: 13px;
+      font-family: 'JetBrains Mono', monospace;
+      outline: none;
+    }
+
+    .verify-input:focus {
+      border-color: #059669;
+      box-shadow: 0 0 0 2px rgba(5, 150, 105, 0.2);
+    }
+
+    .verify-btn {
+      padding: 8px 14px;
+      background: #059669;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: var(--transition);
+      margin: 0;
+      width: auto;
+    }
+
+    .verify-btn:hover {
+      background: #047857;
+    }
+
+    .verify-result {
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 8px;
+      background: #ffffff;
+      font-size: 12.5px;
+      font-family: 'JetBrains Mono', monospace;
+      max-height: 180px;
+      overflow-y: auto;
+      display: none;
+      border: 1px solid #d1fae5;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* Spinners & Micro-animations */
+    .spinner {
+      display: inline-block;
+      width: 18px;
+      height: 18px;
+      border: 2.5px solid rgba(255, 255, 255, 0.35);
+      border-radius: 50%;
+      border-top-color: #ffffff;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .spinner.spinner-blue {
+      border: 2.5px solid rgba(37, 99, 235, 0.2);
+      border-top-color: var(--primary);
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    @keyframes slideUp {
+      from {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    /* Footer Note */
+    .footer-note {
+      text-align: center;
+      margin-top: 22px;
+      font-size: 12.5px;
+      color: #94a3b8;
+    }
+
+    .footer-note code {
+      font-family: 'JetBrains Mono', monospace;
+      background: #e2e8f0;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11.5px;
+      color: #475569;
+    }
+
+    @media (max-width: 480px) {
+      .card {
+        padding: 30px 20px;
+        border-radius: 20px;
+      }
+      h1 {
+        font-size: 23px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <div class="card">
+      <div class="header-group">
+        <div class="brand-badge">
+          <svg viewBox="0 0 24 24">
+            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+          </svg>
+          FastTrack Timetable Engine
+        </div>
+        <h1>Timetable Upload</h1>
+        <div class="subtitle">
+          Upload the student timetable PDF to extract, compile, and reload the class database.
+        </div>
+      </div>
+
+      <form id="uploadForm">
+        <label for="fileInput" class="upload-area" id="dropZone" tabindex="0" role="button" aria-label="Upload PDF timetable file">
+          <div class="upload-icon-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+            </svg>
+          </div>
+
+          <div class="upload-text">
+            <span>Click to browse</span> or drag and drop
+          </div>
+
+          <div class="upload-hint">
+            <span class="pill">PDF only</span>
+            Official timetable report format
+          </div>
+        </label>
+
+        <input
+          type="file"
+          id="fileInput"
+          name="timetable_pdf"
+          accept=".pdf,application/pdf"
+        />
+
+        <div id="fileName" class="file-name">
+          <div class="file-details">
+            <span class="file-pdf-tag">PDF</span>
+            <div class="file-title-group">
+              <div id="fileTitle" class="file-title-text"></div>
+              <div id="fileSize" class="file-size-text"></div>
+            </div>
+          </div>
+          <button type="button" id="clearFileBtn" class="clear-file-btn" title="Remove selected file" aria-label="Remove selected file">✕</button>
+        </div>
+
+        <button
+          type="submit"
+          id="uploadButton"
+          disabled
+        >
+          <span id="buttonIcon">🚀</span>
+          <span id="buttonText">Upload &amp; Process Timetable</span>
+        </button>
+      </form>
+
+      <div id="status" class="status"></div>
+    </div>
+
+    <div class="footer-note">
+      Timetable records are processed and synchronized to <code>students_timetable.ndjson</code>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById("uploadForm");
+    const fileInput = document.getElementById("fileInput");
+    const dropZone = document.getElementById("dropZone");
+    const fileName = document.getElementById("fileName");
+    const fileTitle = document.getElementById("fileTitle");
+    const fileSize = document.getElementById("fileSize");
+    const clearFileBtn = document.getElementById("clearFileBtn");
+    const uploadButton = document.getElementById("uploadButton");
+    const buttonIcon = document.getElementById("buttonIcon");
+    const buttonText = document.getElementById("buttonText");
+    const status = document.getElementById("status");
+
+    // Format bytes into human readable format
+    function formatBytes(bytes, decimals = 1) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const dm = decimals < 0 ? 0 : decimals;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+    }
+
+    // ------------------------------------------------------------
+    // File validation & selection handler
+    // ------------------------------------------------------------
+    function handleFile(file) {
+      if (!file) {
+        resetSelection();
+        return;
+      }
+
+      const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+      if (!isPdf) {
+        showStatus("error", "Invalid file type. Please select a valid PDF file.");
+        resetSelection();
+        return;
+      }
+
+      // Display file metadata
+      fileTitle.textContent = file.name;
+      fileSize.textContent = formatBytes(file.size);
+      fileName.style.display = "flex";
+      uploadButton.disabled = false;
+      clearStatus();
+    }
+
+    function resetSelection() {
+      fileInput.value = "";
+      fileName.style.display = "none";
+      uploadButton.disabled = true;
+    }
+
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files[0];
+      handleFile(file);
+    });
+
+    clearFileBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      resetSelection();
+      clearStatus();
+    });
+
+    // ------------------------------------------------------------
+    // Drag & Drop Interactions
+    // ------------------------------------------------------------
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+      dropZone.addEventListener(eventName, preventDefaults, false);
+      document.body.addEventListener(eventName, preventDefaults, false);
+    });
+
+    function preventDefaults(e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    ['dragenter', 'dragover'].forEach(eventName => {
+      dropZone.addEventListener(eventName, () => {
+        dropZone.classList.add('dragover');
+      }, false);
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+      dropZone.addEventListener(eventName, () => {
+        dropZone.classList.remove('dragover');
+      }, false);
+    });
+
+    dropZone.addEventListener('drop', (e) => {
+      const dt = e.dataTransfer;
+      const files = dt.files;
+      if (files && files.length > 0) {
+        fileInput.files = files;
+        handleFile(files[0]);
+      }
+    });
+
+    // Support keyboard accessibility (Enter/Space triggers file browser)
+    dropZone.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        fileInput.click();
+      }
+    });
+
+    // ------------------------------------------------------------
+    // Form Submission & Processing
+    // ------------------------------------------------------------
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+
+      const file = fileInput.files[0];
+      if (!file) {
+        showStatus("error", "Please select a timetable PDF file first.");
+        return;
+      }
+
+      const formData = new FormData();
+      // Must match multer upload.single("timetable_pdf") on server
+      formData.append("timetable_pdf", file);
+
+      // Loading state
+      uploadButton.disabled = true;
+      buttonIcon.innerHTML = `<span class="spinner"></span>`;
+      buttonText.textContent = "Processing PDF Timetable...";
+
+      showStatus(
+        "loading",
+        `<div class="status-content">
+          <div class="status-icon-box">
+            <span class="spinner spinner-blue"></span>
+          </div>
+          <div class="status-body">
+            <div class="status-title">Uploading &amp; Parsing Timetable</div>
+            <div>Executing PDF parser and updating student cache. This may take 15–30 seconds for complete semester schedules.</div>
+          </div>
+        </div>`
+      );
+
+      try {
+        const response = await fetch("/upload-timetable", {
+          method: "POST",
+          body: formData
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Failed to process timetable.");
+        }
+
+        // --------------------------------------------------------
+        // Success State
+        // --------------------------------------------------------
+        let message = `
+          <div class="status-content">
+            <div class="status-icon-box" style="font-size: 22px;">✅</div>
+            <div class="status-body">
+              <div class="status-title">Timetable Processed Successfully!</div>
+              <div>The database records have been refreshed and reloaded into active memory.</div>
+        `;
+
+        if (data.students_loaded !== undefined) {
+          message += `
+            <div>
+              <span class="stats">
+                👥 Loaded ${data.students_loaded.toLocaleString()} student records
+              </span>
+            </div>
+          `;
+        }
+
+        if (data.source_file) {
+          message += `
+            <div style="margin-top: 6px; font-size: 13px; color: #065f46;">
+              📄 Uploaded source: <strong>${escapeHtml(data.source_file)}</strong>
+            </div>
+          `;
+        }
+
+        // Quick student verification search box
+        message += `
+              <div class="verify-box">
+                <div class="verify-box-title">Quick Student Verification:</div>
+                <div class="verify-form">
+                  <input type="text" id="verifyRollNo" class="verify-input" placeholder="e.g. 23P-3063" />
+                  <button type="button" id="verifyRollBtn" class="verify-btn">Verify Schedule</button>
+                </div>
+                <div id="verifyResult" class="verify-result"></div>
+              </div>
+            </div>
+          </div>
+        `;
+
+        showStatus("success", message);
+
+        // Attach event listener for verification query widget
+        setTimeout(() => {
+          const verifyBtn = document.getElementById("verifyRollBtn");
+          const verifyInput = document.getElementById("verifyRollNo");
+          const verifyResult = document.getElementById("verifyResult");
+
+          if (verifyBtn && verifyInput && verifyResult) {
+            async function testRollNo() {
+              const roll = verifyInput.value.trim();
+              if (!roll) return;
+              verifyBtn.disabled = true;
+              verifyBtn.textContent = "Checking...";
+              verifyResult.style.display = "block";
+              verifyResult.textContent = "Fetching schedule for " + roll + "...";
+
+              try {
+                const res = await fetch(`/${encodeURIComponent(roll)}`);
+                const studentData = await res.json();
+                if (!res.ok) {
+                  verifyResult.textContent = studentData.error || "Student not found.";
+                } else {
+                  verifyResult.textContent = JSON.stringify(studentData, null, 2);
+                }
+              } catch (err) {
+                verifyResult.textContent = "Network error: " + err.message;
+              } finally {
+                verifyBtn.disabled = false;
+                verifyBtn.textContent = "Verify Schedule";
+              }
+            }
+
+            verifyBtn.addEventListener("click", testRollNo);
+            verifyInput.addEventListener("keydown", (e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                testRollNo();
+              }
+            });
+          }
+        }, 50);
+
+        // Reset form and file selection
+        form.reset();
+        resetSelection();
+
+      } catch (error) {
+        console.error(error);
+        showStatus(
+          "error",
+          `<div class="status-content">
+            <div class="status-icon-box" style="font-size: 20px;">⚠️</div>
+            <div class="status-body">
+              <div class="status-title">Processing Failed</div>
+              <div>${escapeHtml(error.message)}</div>
+            </div>
+          </div>`
+        );
+      } finally {
+        buttonIcon.textContent = "🚀";
+        buttonText.textContent = "Upload & Process Timetable";
+        uploadButton.disabled = fileInput.files.length === 0;
+      }
+    });
+
+    // ------------------------------------------------------------
+    // Helper Utilities
+    // ------------------------------------------------------------
+    function showStatus(type, htmlContent) {
+      status.className = `status ${type}`;
+      status.innerHTML = htmlContent;
+    }
+
+    function clearStatus() {
+      status.className = "status";
+      status.innerHTML = "";
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+  </script>
+</body>
+</html>
