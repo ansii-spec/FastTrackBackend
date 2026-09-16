@@ -17,12 +17,41 @@ const pythonScriptPath = fs.existsSync(path.join(__dirname, "converter.py"))
   ? path.join(__dirname, "converter.py")
   : path.join(__dirname, "convert.py");
 
-// Detect virtual environment python if available (updated path from '.env' to 'venv')
-const venvPython = path.join(__dirname, "venv", "bin", "python");
-const pythonCmd = fs.existsSync(venvPython) ? `"${venvPython}"` : "python3";
+// Detect Python executable across virtual environments or system path
+function getPythonCommand() {
+  if (process.env.PYTHON_PATH && fs.existsSync(process.env.PYTHON_PATH)) {
+    return process.env.PYTHON_PATH;
+  }
+  const candidatePaths = [
+    path.join(__dirname, "venv", "bin", "python"),
+    path.join(__dirname, ".env", "bin", "python"),
+    path.join(__dirname, "env", "bin", "python"),
+    path.join(process.env.HOME || "", "venv", "bin", "python"),
+    path.join(process.env.HOME || "", ".venv", "bin", "python"),
+  ];
+  for (const p of candidatePaths) {
+    if (fs.existsSync(p)) return p;
+  }
+  return "python3";
+}
 
-// Configure multer to temporarily store uploaded PDFs in an 'uploads' directory
-const upload = multer({ dest: uploadsDir });
+const pythonCmd = getPythonCommand();
+
+// Startup check for pdfplumber dependency
+exec(`"${pythonCmd}" -c "import pdfplumber"`, (err) => {
+  if (err) {
+    console.warn(`\n⚠️  WARNING: 'pdfplumber' is NOT found in Python environment (${pythonCmd}).`);
+    console.warn("   To fix, run in your terminal: pip install pdfplumber\n");
+  } else {
+    console.log(`Python interpreter verified with 'pdfplumber': ${pythonCmd}`);
+  }
+});
+
+// Configure multer to temporarily store uploaded PDFs with a 100MB limit
+const upload = multer({
+  dest: uploadsDir,
+  limits: { fileSize: 100 * 1024 * 1024 }
+});
 
 // Metadata file to persist the uploaded PDF filename across server restarts
 const metadataPath = path.join(__dirname, "timetable_metadata.json");
@@ -83,6 +112,10 @@ loadDatabase();
 
 // 1. POST Route to upload PDF, process it, and update the in-memory cache
 app.post("/upload-timetable", upload.single("timetable_pdf"), (req, res) => {
+  // Allow up to 10 minutes for large timetable PDF extraction
+  req.setTimeout(600000);
+  res.setTimeout(600000);
+
   if (!req.file) {
     return res.status(400).json({ error: "No PDF file uploaded." });
   }
@@ -90,17 +123,43 @@ app.post("/upload-timetable", upload.single("timetable_pdf"), (req, res) => {
   const uploadedPdfPath = req.file.path;
   const originalPdfName = req.file.originalname;
 
-  // Execute the Python script, passing the uploaded PDF path as an argument
-  exec(`${pythonCmd} "${pythonScriptPath}" "${uploadedPdfPath}"`, (error, stdout, stderr) => {
+  console.log(`[Upload] Processing timetable PDF: "${originalPdfName}" (${(req.file.size / 1024 / 1024).toFixed(2)} MB)...`);
+
+  // Execute the Python script with expanded buffer and timeout
+  const execOptions = {
+    maxBuffer: 30 * 1024 * 1024, // 30MB stdout buffer to prevent overflow on large PDFs
+    timeout: 600000              // 10 minute timeout
+  };
+
+  exec(`"${pythonCmd}" "${pythonScriptPath}" "${uploadedPdfPath}"`, execOptions, (error, stdout, stderr) => {
     // Delete the temporary uploaded PDF file to keep server clean
     fs.unlink(uploadedPdfPath, (err) => {
       if (err) console.error("Failed to delete temp PDF file:", err);
     });
 
     if (error) {
-      console.error(`Python Execution Error: ${error.message}`);
-      return res.status(500).json({ error: "Failed to process the timetable PDF." });
+      console.error(`[Upload Error]: ${error.message}`);
+      if (stderr) console.error(`[Python stderr]:\n${stderr}`);
+
+      let errorMessage = "Failed to process the timetable PDF.";
+      let solutionHint = "";
+
+      if (stderr && stderr.includes("No module named 'pdfplumber'")) {
+        errorMessage = "Python library 'pdfplumber' is missing on the server.";
+        solutionHint = "Run 'pip install pdfplumber' in your server environment.";
+      } else if (error.signal === "SIGKILL" || error.code === 137) {
+        errorMessage = "Server ran out of memory (OOM Killed by Linux).";
+        solutionHint = "Enable swap memory on your EC2 instance (e.g. 'sudo fallocate -l 2G /swapfile').";
+      }
+
+      return res.status(500).json({
+        error: errorMessage,
+        hint: solutionHint,
+        details: stderr ? stderr.trim() : error.message
+      });
     }
+
+    console.log(`[Upload] PDF parsed successfully by Python.`);
 
     // Reload the database in memory now that the file has been overwritten by Python
     loadDatabase(() => {
@@ -114,6 +173,8 @@ app.post("/upload-timetable", upload.single("timetable_pdf"), (req, res) => {
       } catch (err) {
         console.error("Failed to save timetable metadata:", err.message);
       }
+
+      console.log(`[Upload] Database reloaded with ${students.length} student records.`);
 
       res.json({
         message: "Timetable updated and reloaded successfully!",
@@ -154,6 +215,10 @@ app.get("/:rollno", (req, res) => {
   });
 });
 
-app.listen(PORT, () =>
+const server = app.listen(PORT, () =>
   console.log(`Server running on http://localhost:${PORT}`)
 );
+
+// Keep TCP sockets alive for lengthy file processing
+server.setTimeout(600000);
+server.keepAliveTimeout = 65000;
