@@ -82,7 +82,23 @@ function loadDatabase(callback) {
     return;
   }
 
+  let isClosed = false;
+  const done = (err) => {
+    if (isClosed) return;
+    isClosed = true;
+    if (err) console.error("Database load warning:", err.message);
+    console.log(
+      `Database fully loaded. Cached ${students.length} student records.`
+    );
+    if (callback) callback();
+  };
+
   const fileStream = fs.createReadStream(filePath);
+  fileStream.on("error", (err) => {
+    console.error("Error reading database file stream:", err.message);
+    done(err);
+  });
+
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity,
@@ -100,10 +116,7 @@ function loadDatabase(callback) {
   });
 
   rl.on("close", () => {
-    console.log(
-      `Database fully loaded. Cached ${students.length} student records.`
-    );
-    if (callback) callback();
+    done();
   });
 }
 
@@ -203,55 +216,30 @@ app.post("/upload-timetable", upload.single("timetable_pdf"), (req, res) => {
 
   // Launch Python converter asynchronously using spawn to stream real-time progress
   let pythonStderr = "";
-  const pyProcess = spawn(pythonCmd, [pythonScriptPath, uploadedPdfPath]);
+  let isHandled = false;
+  let forceCompleteTimer = null;
 
-  pyProcess.stdout.on("data", (chunk) => {
-    const text = chunk.toString();
-    console.log(`[Python]: ${text.trim()}`);
+  // Set stdio[0] to 'ignore' so Node doesn't hold open an unused stdin pipe
+  const pyProcess = spawn(pythonCmd, [pythonScriptPath, uploadedPdfPath], {
+    stdio: ["ignore", "pipe", "pipe"]
+  });
 
-    // Parse progress from converter.py: "  page 30/68 -> 30 students"
-    const match = text.match(/page\s+(\d+)\/(\d+)\s+->\s+(\d+)\s+students/i);
-    if (match) {
-      const page = parseInt(match[1], 10);
-      const totalPages = parseInt(match[2], 10);
-      const studentCount = parseInt(match[3], 10);
+  const completeUploadJob = (exitCode, exitSignal) => {
+    if (isHandled) return;
+    isHandled = true;
 
-      currentUploadJob.page = page;
-      currentUploadJob.totalPages = totalPages;
-      currentUploadJob.studentsLoaded = studentCount;
-
-      // Map progress from 10% to 90% during page parsing
-      const pct = Math.round(10 + (page / totalPages) * 80);
-      currentUploadJob.progress = Math.min(90, pct);
-      currentUploadJob.stage = `Parsed page ${page} of ${totalPages} (${studentCount.toLocaleString()} students found)...`;
-    } else if (text.includes("Processing page-by-page")) {
-      currentUploadJob.progress = 10;
-      currentUploadJob.stage = "Scanning timetable pages...";
+    if (forceCompleteTimer) {
+      clearTimeout(forceCompleteTimer);
+      forceCompleteTimer = null;
     }
-  });
 
-  pyProcess.stderr.on("data", (chunk) => {
-    pythonStderr += chunk.toString();
-  });
-
-  pyProcess.on("error", (err) => {
-    console.error(`[Process Launch Error]: ${err.message}`);
-    fs.unlink(uploadedPdfPath, () => {});
-
-    currentUploadJob.status = "error";
-    currentUploadJob.error = "Failed to launch Python parser.";
-    currentUploadJob.details = err.message;
-    currentUploadJob.hint = "Verify Python installation and file permissions.";
-  });
-
-  pyProcess.on("close", (code, signal) => {
     // Delete temp upload file
     fs.unlink(uploadedPdfPath, (err) => {
-      if (err) console.error("Failed to delete temp PDF file:", err);
+      if (err && err.code !== "ENOENT") console.error("Failed to delete temp PDF file:", err.message);
     });
 
-    if (code !== 0) {
-      console.error(`[Python Exit with code ${code} / signal ${signal}]`);
+    if (exitCode !== 0 && exitCode !== null && exitCode !== undefined) {
+      console.error(`[Python Exit with code ${exitCode} / signal ${exitSignal}]`);
       if (pythonStderr) console.error(`[Python stderr]:\n${pythonStderr}`);
 
       let errorMessage = "Failed to process the timetable PDF.";
@@ -260,7 +248,7 @@ app.post("/upload-timetable", upload.single("timetable_pdf"), (req, res) => {
       if (pythonStderr && pythonStderr.includes("No module named 'pdfplumber'")) {
         errorMessage = "Python library 'pdfplumber' is missing on the server.";
         solutionHint = "Run 'pip install pdfplumber' in your server environment.";
-      } else if (signal === "SIGKILL" || code === 137) {
+      } else if (exitSignal === "SIGKILL" || exitCode === 137) {
         errorMessage = "Server ran out of memory (OOM Killed by Linux).";
         solutionHint = "Enable swap memory on your EC2 instance (e.g. 'sudo fallocate -l 2G /swapfile').";
       }
@@ -268,7 +256,7 @@ app.post("/upload-timetable", upload.single("timetable_pdf"), (req, res) => {
       currentUploadJob.status = "error";
       currentUploadJob.error = errorMessage;
       currentUploadJob.hint = solutionHint;
-      currentUploadJob.details = pythonStderr ? pythonStderr.trim() : `Process exited with code ${code}`;
+      currentUploadJob.details = pythonStderr ? pythonStderr.trim() : `Process exited with code ${exitCode}`;
       return;
     }
 
@@ -296,6 +284,73 @@ app.post("/upload-timetable", upload.single("timetable_pdf"), (req, res) => {
       currentUploadJob.studentsLoaded = students.length;
       currentUploadJob.completedAt = new Date().toISOString();
     });
+  };
+
+  pyProcess.stdout.on("data", (chunk) => {
+    const text = chunk.toString();
+    console.log(`[Python]: ${text.trim()}`);
+
+    // Parse progress from converter.py: "  page 30/68 -> 30 students"
+    const match = text.match(/page\s+(\d+)\/(\d+)\s+->\s+(\d+)\s+students/i);
+    if (match) {
+      const page = parseInt(match[1], 10);
+      const totalPages = parseInt(match[2], 10);
+      const studentCount = parseInt(match[3], 10);
+
+      currentUploadJob.page = page;
+      currentUploadJob.totalPages = totalPages;
+      currentUploadJob.studentsLoaded = studentCount;
+
+      // Map progress from 10% to 90% during page parsing
+      const pct = Math.round(10 + (page / totalPages) * 80);
+      currentUploadJob.progress = Math.min(90, pct);
+      currentUploadJob.stage = `Parsed page ${page} of ${totalPages} (${studentCount.toLocaleString()} students found)...`;
+    } else if (text.includes("Processing page-by-page")) {
+      currentUploadJob.progress = 10;
+      currentUploadJob.stage = "Scanning timetable pages...";
+    }
+
+    // When converter outputs its final completion text, the file has been atomically replaced on disk!
+    if (text.includes("Finished. Students:") || text.includes("Each line is a complete JSON object")) {
+      currentUploadJob.progress = 95;
+      currentUploadJob.stage = "Finalizing timetable synchronization...";
+
+      // Watchdog: If exit/close hasn't fired within 1.5 seconds, force-complete immediately
+      if (!forceCompleteTimer) {
+        forceCompleteTimer = setTimeout(() => {
+          if (!isHandled) {
+            console.log("[Upload] Completion marker detected from Python. Finalizing database sync...");
+            try {
+              pyProcess.kill("SIGTERM");
+            } catch (e) {}
+            completeUploadJob(0, null);
+          }
+        }, 1500);
+      }
+    }
+  });
+
+  pyProcess.stderr.on("data", (chunk) => {
+    pythonStderr += chunk.toString();
+  });
+
+  pyProcess.on("error", (err) => {
+    console.error(`[Process Launch Error]: ${err.message}`);
+    fs.unlink(uploadedPdfPath, () => {});
+
+    currentUploadJob.status = "error";
+    currentUploadJob.error = "Failed to launch Python parser.";
+    currentUploadJob.details = err.message;
+    currentUploadJob.hint = "Verify Python installation and file permissions.";
+  });
+
+  // Listen to BOTH 'exit' and 'close' so we never get stuck waiting on dangling stdio pipes
+  pyProcess.on("exit", (code, signal) => {
+    completeUploadJob(code, signal);
+  });
+
+  pyProcess.on("close", (code, signal) => {
+    completeUploadJob(code, signal);
   });
 });
 

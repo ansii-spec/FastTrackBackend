@@ -18,6 +18,7 @@ Requires:
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import re
@@ -612,9 +613,10 @@ def process_pdf(pdf_path: Path) -> None:
                 ):
 
                     page_number = page_idx + 1
+                    page = pdf.pages[page_idx]
 
                     records = process_page(
-                        pdf.pages[page_idx],
+                        page,
                         page_number,
                     )
 
@@ -635,12 +637,19 @@ def process_pdf(pdf_path: Path) -> None:
 
                         total_students += 1
 
-                    # Flush periodically.
+                    # Free memory for this page immediately so RAM doesn't balloon on EC2
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+
+                    # Flush periodically and free unreferenced objects
                     if (
                         page_number % 30 == 0
                         or page_number == pages_to_do
                     ):
                         temp_file.flush()
+                        gc.collect()
 
                         print(
                             f"  page "
@@ -728,4 +737,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    ret = main()
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(ret)
