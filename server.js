@@ -129,6 +129,24 @@ let currentUploadJob = {
 
 // Polling endpoint to check live processing status
 app.get("/upload-status", (req, res) => {
+  const requestedJobId = req.query.job_id;
+
+  // If a specific new job was requested but hasn't updated the global state yet
+  if (requestedJobId && currentUploadJob.id && currentUploadJob.id !== requestedJobId) {
+    return res.json({
+      id: requestedJobId,
+      status: "processing",
+      progress: 5,
+      stage: "Initializing PDF parser on server...",
+      page: 0,
+      totalPages: 0,
+      studentsLoaded: 0,
+      sourceFile: currentSourceFile,
+      totalCachedStudents: students.length,
+      activeSourceFile: currentSourceFile
+    });
+  }
+
   res.json({
     ...currentUploadJob,
     totalCachedStudents: students.length,

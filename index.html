@@ -879,15 +879,21 @@
 
             async function checkStatus() {
                 try {
-                    const res = await fetch("/upload-status");
+                    const url = jobId ? `/upload-status?job_id=${encodeURIComponent(jobId)}` : "/upload-status";
+                    const res = await fetch(url);
                     const data = await res.json();
+
+                    // Guard against showing previous completed job
+                    if (jobId && data.id && data.id !== jobId) {
+                        return;
+                    }
 
                     const elapsed = Math.max(1, Math.floor((Date.now() - jobStartTime) / 1000));
                     if (progressMetricSpeed) {
                         progressMetricSpeed.textContent = `Server elapsed: ${elapsed}s`;
                     }
 
-                    if (data.status === "processing") {
+                    if (data.status === "processing" || data.status === "pending") {
                         const pct = data.progress || 10;
                         if (progressBarFill) progressBarFill.style.width = pct + "%";
                         if (progressPercent) progressPercent.textContent = pct + "%";
@@ -904,13 +910,13 @@
                             statusSubtext.textContent = `Processing "${escapeHtml(data.sourceFile || "timetable")}" on server...`;
                         }
 
-                    } else if (data.status === "completed") {
+                    } else if (data.status === "completed" && (!jobId || data.id === jobId)) {
                         clearInterval(pollingTimer);
                         pollingTimer = null;
                         renderSuccessUI(data);
                         resetButton();
 
-                    } else if (data.status === "error") {
+                    } else if (data.status === "error" && (!jobId || data.id === jobId)) {
                         clearInterval(pollingTimer);
                         pollingTimer = null;
                         renderErrorUI(data.error || "Processing failed.", data.hint, data.details);
@@ -1042,6 +1048,11 @@
         // ------------------------------------------------------------
         form.addEventListener("submit", (event) => {
             event.preventDefault();
+
+            if (pollingTimer) {
+                clearInterval(pollingTimer);
+                pollingTimer = null;
+            }
 
             const file = fileInput.files[0];
             if (!file) {
