@@ -826,7 +826,219 @@
         });
 
         // ------------------------------------------------------------
-        // Form Submission & Progress-Tracked Processing
+        // Polling & Background Job Management
+        // ------------------------------------------------------------
+        let pollingTimer = null;
+        let jobStartTime = null;
+
+        function renderProgressUI(title, subtext) {
+            showStatus(
+                "loading",
+                `<div class="status-content">
+          <div class="status-icon-box">
+            <span class="spinner spinner-blue"></span>
+          </div>
+          <div class="status-body">
+            <div class="status-title">${escapeHtml(title)}</div>
+            <div id="statusSubtext">${escapeHtml(subtext)}</div>
+            
+            <div class="progress-box">
+              <div class="progress-header">
+                <div class="progress-stage" id="progressStage">📤 Initializing upload...</div>
+                <div class="progress-badge" id="progressPercent">0%</div>
+              </div>
+              <div class="progress-bar-track">
+                <div class="progress-bar-fill" id="progressBarFill" style="width: 0%;"></div>
+              </div>
+              <div class="progress-metrics">
+                <span id="progressMetricSent">Connecting to server...</span>
+                <span id="progressMetricSpeed">Elapsed: 0s</span>
+              </div>
+            </div>
+          </div>
+        </div>`
+            );
+        }
+
+        function startStatusPolling(jobId, existingStartedAt) {
+            if (pollingTimer) clearInterval(pollingTimer);
+            jobStartTime = existingStartedAt ? new Date(existingStartedAt).getTime() : Date.now();
+
+            uploadButton.disabled = true;
+            buttonIcon.innerHTML = `<span class="spinner"></span>`;
+            buttonText.textContent = "Processing on Server...";
+
+            const progressStage = document.getElementById("progressStage");
+            const progressPercent = document.getElementById("progressPercent");
+            const progressBarFill = document.getElementById("progressBarFill");
+            const progressMetricSent = document.getElementById("progressMetricSent");
+            const progressMetricSpeed = document.getElementById("progressMetricSpeed");
+            const statusSubtext = document.getElementById("statusSubtext");
+
+            if (progressBarFill) progressBarFill.classList.add("processing");
+
+            async function checkStatus() {
+                try {
+                    const res = await fetch("/upload-status");
+                    const data = await res.json();
+
+                    const elapsed = Math.max(1, Math.floor((Date.now() - jobStartTime) / 1000));
+                    if (progressMetricSpeed) {
+                        progressMetricSpeed.textContent = `Server elapsed: ${elapsed}s`;
+                    }
+
+                    if (data.status === "processing") {
+                        const pct = data.progress || 10;
+                        if (progressBarFill) progressBarFill.style.width = pct + "%";
+                        if (progressPercent) progressPercent.textContent = pct + "%";
+                        if (progressStage) progressStage.innerHTML = `⚙️ ${escapeHtml(data.stage || "Extracting timetable pages...")}`;
+
+                        if (progressMetricSent) {
+                            if (data.totalPages > 0) {
+                                progressMetricSent.textContent = `Page ${data.page}/${data.totalPages} • ${data.studentsLoaded || 0} students`;
+                            } else {
+                                progressMetricSent.textContent = `Working in background...`;
+                            }
+                        }
+                        if (statusSubtext) {
+                            statusSubtext.textContent = `Processing "${escapeHtml(data.sourceFile || "timetable")}" on server...`;
+                        }
+
+                    } else if (data.status === "completed") {
+                        clearInterval(pollingTimer);
+                        pollingTimer = null;
+                        renderSuccessUI(data);
+                        resetButton();
+
+                    } else if (data.status === "error") {
+                        clearInterval(pollingTimer);
+                        pollingTimer = null;
+                        renderErrorUI(data.error || "Processing failed.", data.hint, data.details);
+                        resetButton();
+                    }
+                } catch (err) {
+                    console.warn("Status poll error:", err.message);
+                }
+            }
+
+            // Poll every 1.5 seconds
+            checkStatus();
+            pollingTimer = setInterval(checkStatus, 1500);
+        }
+
+        function renderSuccessUI(data) {
+            const count = data.studentsLoaded || data.students_loaded || data.totalCachedStudents || 0;
+            const source = data.sourceFile || data.source_file || data.activeSourceFile || "";
+
+            let message = `
+          <div class="status-content">
+            <div class="status-icon-box" style="font-size: 22px;">✅</div>
+            <div class="status-body">
+              <div class="status-title">Timetable Processed Successfully!</div>
+              <div>The database records have been refreshed and reloaded into active memory.</div>
+              <div>
+                <span class="stats">
+                  👥 Loaded ${count.toLocaleString()} student records
+                </span>
+              </div>
+        `;
+
+            if (source) {
+                message += `
+            <div style="margin-top: 6px; font-size: 13px; color: #065f46;">
+              📄 Uploaded source: <strong>${escapeHtml(source)}</strong>
+            </div>
+          `;
+            }
+
+            message += `
+              <div class="verify-box">
+                <div class="verify-box-title">Quick Student Verification:</div>
+                <div class="verify-form">
+                  <input type="text" id="verifyRollNo" class="verify-input" placeholder="e.g. 23P-3063" />
+                  <button type="button" id="verifyRollBtn" class="verify-btn">Verify Schedule</button>
+                </div>
+                <div id="verifyResult" class="verify-result"></div>
+              </div>
+            </div>
+          </div>
+        `;
+
+            showStatus("success", message);
+
+            setTimeout(() => {
+                const verifyBtn = document.getElementById("verifyRollBtn");
+                const verifyInput = document.getElementById("verifyRollNo");
+                const verifyResult = document.getElementById("verifyResult");
+
+                if (verifyBtn && verifyInput && verifyResult) {
+                    async function testRollNo() {
+                        const roll = verifyInput.value.trim();
+                        if (!roll) return;
+                        verifyBtn.disabled = true;
+                        verifyBtn.textContent = "Checking...";
+                        verifyResult.style.display = "block";
+                        verifyResult.textContent = "Fetching schedule for " + roll + "...";
+
+                        try {
+                            const res = await fetch(`/${encodeURIComponent(roll)}`);
+                            const studentData = await res.json();
+                            if (!res.ok) {
+                                verifyResult.textContent = studentData.error || "Student not found.";
+                            } else {
+                                verifyResult.textContent = JSON.stringify(studentData, null, 2);
+                            }
+                        } catch (err) {
+                            verifyResult.textContent = "Network error: " + err.message;
+                        } finally {
+                            verifyBtn.disabled = false;
+                            verifyBtn.textContent = "Verify Schedule";
+                        }
+                    }
+
+                    verifyBtn.addEventListener("click", testRollNo);
+                    verifyInput.addEventListener("keydown", (e) => {
+                        if (e.key === "Enter") {
+                            e.preventDefault();
+                            testRollNo();
+                        }
+                    });
+                }
+            }, 50);
+
+            form.reset();
+            resetSelection();
+        }
+
+        function renderErrorUI(message, hint, details) {
+            let errorHtml = `<div>${escapeHtml(message)}</div>`;
+            if (hint) {
+                errorHtml += `<div style="margin-top: 6px; font-weight: 600; color: #b91c1c;">💡 Hint: ${escapeHtml(hint)}</div>`;
+            }
+            if (details) {
+                errorHtml += `<pre style="margin-top: 8px; padding: 8px; background: #fff5f5; border: 1px solid #fecaca; border-radius: 6px; font-size: 11px; max-height: 120px; overflow: auto; text-align: left;">${escapeHtml(details)}</pre>`;
+            }
+
+            showStatus(
+                "error",
+                `<div class="status-content">
+            <div class="status-icon-box" style="font-size: 20px;">⚠️</div>
+            <div class="status-body">
+              <div class="status-title">Processing Failed</div>
+              ${errorHtml}
+            </div>
+          </div>`
+            );
+        }
+
+        function resetButton() {
+            buttonIcon.textContent = "🚀";
+            buttonText.textContent = "Upload & Process Timetable";
+            uploadButton.disabled = fileInput.files.length === 0;
+        }
+
+        // ------------------------------------------------------------
+        // Form Submission (Upload Phase -> Polling Phase)
         // ------------------------------------------------------------
         form.addEventListener("submit", (event) => {
             event.preventDefault();
@@ -840,42 +1052,14 @@
             const formData = new FormData();
             formData.append("timetable_pdf", file);
 
-            // UI Loading state
             uploadButton.disabled = true;
             buttonIcon.innerHTML = `<span class="spinner"></span>`;
-            buttonText.textContent = "Uploading & Processing...";
+            buttonText.textContent = "Uploading PDF...";
 
             const totalBytes = file.size;
             const startTime = Date.now();
-            let timerInterval = null;
 
-            // Render live progress container inside status
-            showStatus(
-                "loading",
-                `<div class="status-content">
-          <div class="status-icon-box">
-            <span class="spinner spinner-blue"></span>
-          </div>
-          <div class="status-body">
-            <div class="status-title">Uploading &amp; Processing Timetable</div>
-            <div id="statusSubtext">Transmitting timetable PDF to backend server...</div>
-            
-            <div class="progress-box">
-              <div class="progress-header">
-                <div class="progress-stage" id="progressStage">📤 Sending PDF data...</div>
-                <div class="progress-badge" id="progressPercent">0%</div>
-              </div>
-              <div class="progress-bar-track">
-                <div class="progress-bar-fill" id="progressBarFill" style="width: 0%;"></div>
-              </div>
-              <div class="progress-metrics">
-                <span id="progressMetricSent">Sent: 0 Bytes / ${formatBytes(totalBytes)}</span>
-                <span id="progressMetricSpeed">Calculating...</span>
-              </div>
-            </div>
-          </div>
-        </div>`
-            );
+            renderProgressUI("Uploading & Processing Timetable", "Transmitting timetable PDF to backend server...");
 
             const progressStage = document.getElementById("progressStage");
             const progressPercent = document.getElementById("progressPercent");
@@ -887,7 +1071,7 @@
             const xhr = new XMLHttpRequest();
             xhr.open("POST", "/upload-timetable", true);
 
-            // 1. Data Sent (Upload Progress)
+            // Real-time byte upload tracking
             xhr.upload.onprogress = (e) => {
                 if (e.lengthComputable) {
                     const loaded = e.loaded;
@@ -895,239 +1079,69 @@
                     const percent = Math.min(100, Math.round((loaded / total) * 100));
 
                     const elapsedSec = Math.max(0.1, (Date.now() - startTime) / 1000);
-                    const speed = loaded / elapsedSec; // bytes per second
+                    const speed = loaded / elapsedSec;
 
-                    if (progressBarFill) {
-                        // Keep within 0-98% until server completes processing
-                        progressBarFill.style.width = Math.min(percent, 98) + "%";
-                    }
-                    if (progressPercent) {
-                        progressPercent.textContent = percent + "%";
-                    }
-                    if (progressMetricSent) {
-                        progressMetricSent.textContent = `Sent: ${formatBytes(loaded)} / ${formatBytes(total)}`;
-                    }
-                    if (progressMetricSpeed) {
-                        progressMetricSpeed.textContent = `${formatBytes(speed)}/s`;
-                    }
+                    if (progressBarFill) progressBarFill.style.width = Math.min(percent, 98) + "%";
+                    if (progressPercent) progressPercent.textContent = percent + "%";
+                    if (progressMetricSent) progressMetricSent.textContent = `Sent: ${formatBytes(loaded)} / ${formatBytes(total)}`;
+                    if (progressMetricSpeed) progressMetricSpeed.textContent = `${formatBytes(speed)}/s`;
 
-                    // When 100% of data has been sent to server, transition to processing phase
                     if (loaded >= total) {
-                        onUploadCompleteTransition();
+                        if (progressStage) progressStage.innerHTML = "⚙️ Upload received. Handing off to parser...";
+                        if (statusSubtext) statusSubtext.textContent = "Upload complete! Initializing background processing job...";
                     }
                 }
             };
 
-            let uploadCompleted = false;
-            function onUploadCompleteTransition() {
-                if (uploadCompleted) return;
-                uploadCompleted = true;
-
-                if (progressStage) {
-                    progressStage.innerHTML = "⚙️ Server processing &amp; indexing PDF...";
-                }
-                if (statusSubtext) {
-                    statusSubtext.textContent = "All bytes transmitted! Python parser is extracting class slots & building database records...";
-                }
-                if (progressBarFill) {
-                    progressBarFill.classList.add("processing");
-                    progressBarFill.style.width = "90%";
-                }
-                if (progressPercent) {
-                    progressPercent.textContent = "Processing...";
-                }
-
-                // Dynamic live elapsed timer & progress hints while Python parses PDF
-                const serverStartTime = Date.now();
-                const hints = [
-                    "Extracting timetable grid & slots...",
-                    "Matching rooms, teachers & student records...",
-                    "Compiling NDJSON database cache...",
-                    "Finalizing student database in active memory..."
-                ];
-                let hintIndex = 0;
-
-                timerInterval = setInterval(() => {
-                    const elapsed = Math.floor((Date.now() - serverStartTime) / 1000);
-                    if (progressMetricSpeed) {
-                        progressMetricSpeed.textContent = `Server elapsed: ${elapsed}s`;
-                    }
-                    if (progressMetricSent) {
-                        progressMetricSent.textContent = hints[hintIndex % hints.length];
-                    }
-                    if (elapsed % 6 === 0) {
-                        hintIndex++;
-                    }
-                }, 1000);
-            }
-
-            // 2. Data Received / Download Progress
-            xhr.onprogress = (e) => {
-                if (e.lengthComputable && e.total > 0) {
-                    const recvPercent = Math.round((e.loaded / e.total) * 100);
-                    if (progressStage) {
-                        progressStage.innerHTML = "📥 Receiving server response...";
-                    }
-                    if (progressMetricSent) {
-                        progressMetricSent.textContent = `Received: ${formatBytes(e.loaded)} / ${formatBytes(e.total)}`;
-                    }
-                    if (progressPercent) {
-                        progressPercent.textContent = `${recvPercent}%`;
-                    }
-                }
-            };
-
-            // 3. Request Completion
+            // Server accepted upload and started background job
             xhr.onload = () => {
-                if (timerInterval) clearInterval(timerInterval);
-
-                if (progressBarFill) progressBarFill.style.width = "100%";
-                if (progressPercent) progressPercent.textContent = "100%";
-
                 let data = {};
                 try {
                     data = JSON.parse(xhr.responseText || "{}");
                 } catch (err) {
-                    data = { error: "Invalid JSON server response" };
+                    data = { error: "Invalid JSON response from server" };
                 }
 
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    // Success
-                    let message = `
-          <div class="status-content">
-            <div class="status-icon-box" style="font-size: 22px;">✅</div>
-            <div class="status-body">
-              <div class="status-title">Timetable Processed Successfully!</div>
-              <div>The database records have been refreshed and reloaded into active memory.</div>
-        `;
+                if (xhr.status === 202) {
+                    // 202 Accepted: start background polling
+                    if (progressStage) progressStage.innerHTML = "⚙️ Background extraction started...";
+                    startStatusPolling(data.job_id);
 
-                    if (data.students_loaded !== undefined) {
-                        message += `
-            <div>
-              <span class="stats">
-                👥 Loaded ${data.students_loaded.toLocaleString()} student records
-              </span>
-            </div>
-          `;
-                    }
+                } else if (xhr.status === 409) {
+                    // Job already running
+                    renderErrorUI(data.error, data.hint);
+                    startStatusPolling(data.job_id);
 
-                    if (data.source_file) {
-                        message += `
-            <div style="margin-top: 6px; font-size: 13px; color: #065f46;">
-              📄 Uploaded source: <strong>${escapeHtml(data.source_file)}</strong>
-            </div>
-          `;
-                    }
-
-                    // Quick student verification search box
-                    message += `
-              <div class="verify-box">
-                <div class="verify-box-title">Quick Student Verification:</div>
-                <div class="verify-form">
-                  <input type="text" id="verifyRollNo" class="verify-input" placeholder="e.g. 23P-3063" />
-                  <button type="button" id="verifyRollBtn" class="verify-btn">Verify Schedule</button>
-                </div>
-                <div id="verifyResult" class="verify-result"></div>
-              </div>
-            </div>
-          </div>
-        `;
-
-                    showStatus("success", message);
-
-                    // Attach event listener for verification query widget
-                    setTimeout(() => {
-                        const verifyBtn = document.getElementById("verifyRollBtn");
-                        const verifyInput = document.getElementById("verifyRollNo");
-                        const verifyResult = document.getElementById("verifyResult");
-
-                        if (verifyBtn && verifyInput && verifyResult) {
-                            async function testRollNo() {
-                                const roll = verifyInput.value.trim();
-                                if (!roll) return;
-                                verifyBtn.disabled = true;
-                                verifyBtn.textContent = "Checking...";
-                                verifyResult.style.display = "block";
-                                verifyResult.textContent = "Fetching schedule for " + roll + "...";
-
-                                try {
-                                    const res = await fetch(`/${encodeURIComponent(roll)}`);
-                                    const studentData = await res.json();
-                                    if (!res.ok) {
-                                        verifyResult.textContent = studentData.error || "Student not found.";
-                                    } else {
-                                        verifyResult.textContent = JSON.stringify(studentData, null, 2);
-                                    }
-                                } catch (err) {
-                                    verifyResult.textContent = "Network error: " + err.message;
-                                } finally {
-                                    verifyBtn.disabled = false;
-                                    verifyBtn.textContent = "Verify Schedule";
-                                }
-                            }
-
-                            verifyBtn.addEventListener("click", testRollNo);
-                            verifyInput.addEventListener("keydown", (e) => {
-                                if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    testRollNo();
-                                }
-                            });
-                        }
-                    }, 50);
-
-                    form.reset();
-                    resetSelection();
                 } else {
-                    // Server Error
-                    renderError(data.error || "Failed to process timetable.", data.hint, data.details);
+                    renderErrorUI(data.error || "Failed to initiate upload.", data.hint, data.details);
+                    resetButton();
                 }
-
-                resetButton();
             };
 
-            // 4. Network Error
             xhr.onerror = () => {
-                if (timerInterval) clearInterval(timerInterval);
-                renderError("Network error occurred while uploading. Please check connection and server status.");
+                renderErrorUI("Network connection error while uploading PDF. Please check connection.");
                 resetButton();
             };
-
-            // 5. Timeout
-            xhr.ontimeout = () => {
-                if (timerInterval) clearInterval(timerInterval);
-                renderError("Upload request timed out on the client side.");
-                resetButton();
-            };
-
-            function renderError(message, hint, details) {
-                let errorHtml = `<div>${escapeHtml(message)}</div>`;
-                if (hint) {
-                    errorHtml += `<div style="margin-top: 6px; font-weight: 600; color: #b91c1c;">💡 Hint: ${escapeHtml(hint)}</div>`;
-                }
-                if (details) {
-                    errorHtml += `<pre style="margin-top: 8px; padding: 8px; background: #fff5f5; border: 1px solid #fecaca; border-radius: 6px; font-size: 11px; max-height: 120px; overflow: auto; text-align: left;">${escapeHtml(details)}</pre>`;
-                }
-
-                showStatus(
-                    "error",
-                    `<div class="status-content">
-            <div class="status-icon-box" style="font-size: 20px;">⚠️</div>
-            <div class="status-body">
-              <div class="status-title">Processing Failed</div>
-              ${errorHtml}
-            </div>
-          </div>`
-                );
-            }
-
-            function resetButton() {
-                buttonIcon.textContent = "🚀";
-                buttonText.textContent = "Upload & Process Timetable";
-                uploadButton.disabled = fileInput.files.length === 0;
-            }
 
             xhr.send(formData);
+        });
+
+        // ------------------------------------------------------------
+        // Auto-Resume on Page Reload (Handles Ctrl + R smoothly)
+        // ------------------------------------------------------------
+        window.addEventListener("DOMContentLoaded", async () => {
+            try {
+                const res = await fetch("/upload-status");
+                const data = await res.json();
+
+                if (data.status === "processing") {
+                    console.log("Active processing job detected. Resuming status polling...");
+                    renderProgressUI("Processing Timetable in Progress", `Resumed tracking for "${escapeHtml(data.sourceFile || "timetable")}"...`);
+                    startStatusPolling(data.id, data.startedAt);
+                }
+            } catch (err) {
+                // Server not ready yet or network idle
+            }
         });
 
         // ------------------------------------------------------------
